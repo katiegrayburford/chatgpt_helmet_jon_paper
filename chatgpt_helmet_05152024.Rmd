@@ -1,0 +1,988 @@
+---
+title: "Use of Generative AI to Identify 4 Helmet Status Among Patients With Micromobility-Related Injuries From Unstructured Clinical Notes"
+author: "Kathryn Burford"
+date: "`r Sys.Date()`"
+output: html_document
+---
+```{r}
+library("tidyverse")
+library("dplyr")
+library("data.table")
+library("readr")
+library("survey")
+library("janitor")
+library("naniar")
+library("gtsummary")
+library("readxl")
+library("ggplot2")
+library("hexbin")
+library("ggsurvey")
+library("irr")
+library("psych")
+library(irr)
+library(rlang)
+library(reshape2)
+library(epiR)
+library(skimr)
+library(DescTools)
+library(purrr)
+library(caret)
+library(purrr)
+library(irr)
+library(stringr)
+```
+
+#read dirty neiss data
+```{r}
+neiss2019 <- read_excel("data/neiss_2019_2022/neiss2019.xlsx")
+neiss2020 <- read_excel("data/neiss_2019_2022/neiss2020.xlsx")
+neiss2021 <- read_excel("data/neiss_2019_2022/neiss2021.xlsx")
+neiss2022 <- read_excel("data/neiss_2019_2022/neiss2022.xlsx")
+```
+
+#merge dataframes
+```{r}
+# Add a new column to represent the original dataframe
+neiss2019 <- neiss2019 %>%
+  mutate(year = 2019)
+
+neiss2020 <- neiss2020 %>%
+  mutate(year = 2020)
+
+neiss2021 <- neiss2021 %>%
+  mutate(year = 2021)
+
+neiss2022 <- neiss2022 %>%
+  mutate(year = 2022)
+
+# Append the dataframes
+df_dirty <- bind_rows(neiss2019, neiss2020, neiss2021, neiss2022)
+df <- bind_rows(neiss2019, neiss2020, neiss2021, neiss2022)
+
+```
+
+
+#clean data 
+
+```{r}
+# tidy column names and select variables of interest
+df <- df %>%
+  janitor::clean_names() %>%
+  select(cpsc_case_number, year, product_1, product_2, product_3, narrative_1)
+
+```
+
+##helmet code
+```{r}
+
+# HELMET 
+# first pull -HELMET and - HELMET 
+df$helmet_negative1 <- ifelse(str_detect(df$narrative_1, "\\-\\s?HELMET") , 1, 0)
+
+# HELMET = NEGATIVE-----
+# create negative helmet list- 
+helmet_neg <- c("NO HELMET", "WITHOUT A HELMET", "WITHOUT HELMET", "NEGATIVE FOR HELMET", "NEGATIVE FOR A HELMET", 
+"NOT HELMETED", "-HELMET", "- HELMET", "NOT WEARING HELMET", "NOT WEARING A HELMET", "UNHELMETED", 
+"W/O HELMET", "DID NOT HAVE ON A HELMET", "NO WEARING HELMET", "DID NOT HAVE A HELMET", 
+"DID NOT HAVE HELMET", "W/O A HELMET", "WITHOUT WEARING HELMET", "WITHOUT WEARING A HELMET", 
+"REMOVED HELMET", "DENIED HELMET", "DENIED USE OF HELMET", "DENIED USE OF A HELMET", "HELMETLESS", 
+"W/OUT HELMET", "DENIES HELMET", "WITH OUT HELMET", "WITH OUT A HELMET", "NOT WEAR A HELMET", 
+"NOT WEAR HELMET", "WO A HELMET", "-HELMET", "NEGATIVE HELMET", "WIHTOUT A HELMET", "NOT WEARIING HELMET", "NOT WEARINNG A HELMET", "NOT WEARIG HELMET")
+
+
+df <- df %>%
+  mutate(helmet_negative2 = ifelse(Reduce(`|`, lapply(helmet_neg, str_detect, string = narrative_1)), 1, 0))
+
+# create variable to combine the two positive variables and remove old variables
+df$helmet_negative <- ifelse(df$helmet_negative1 == 1 | df$helmet_negative2 == 1, 1, 0)
+df<- select(df, -c(helmet_negative1, helmet_negative2))
+
+
+# spot check helment_negative = 0: these should all either be yes helmets or unclear
+# df %>%
+# dplyr::filter(helmet_negative==0) %>% View()
+
+## HELMET = UNSURE-----
+
+# first pull ?HELMET and ? HELMET 
+df$helmet_unknown1 <- ifelse(str_detect(df$narrative_1, "\\?\\s?HELMET") , 1, 0) 
+#first pull HELMET? 
+df$helmet_unknown1.1 <- ifelse(str_detect(df$narrative_1, "HELMET\\?") , 1, 0)
+
+# then pull all other unknown helmet phrases
+# create unknown helmet list
+helmet_unk <- c("UNSURE IF HELMET", "UNSURE IF HELMETED", "UNSURE IF PT WEARING HELMET", 
+"UNSURE IF PT WEARING A HELMET", "UNSURE IF PT WAS WEARING HELMET", 
+"UNSURE IF PT WAS WEARING A HELMET", "UNKNOWN IF HELMET", "HELMET UNKNOWN", 
+"UNKNOWN HELMET", "NO MENTION OF HELMET", "UNK HELMET", "HELMET UNK", 
+"HELMET NS", "NS HELMET")
+
+#create variable indicating presence of one of the phrases
+df <- df %>%
+  mutate(helmet_unknown2 = ifelse(Reduce(`|`, lapply(helmet_unk, str_detect, string = narrative_1)), 1, 0))
+
+#create new variable to combine the two unknowns and remove old variables
+df$helmet_unknown <- ifelse(df$helmet_unknown1 == 1 | df$helmet_unknown1.1 ==1 | df$helmet_unknown2 == 1, 1, 0)
+df <- select(df, -c(helmet_unknown1,helmet_unknown1.1, helmet_unknown2))
+
+# spot check helmet_negative = 0 and helmet_unknown =0: these should all be yes or some weird wording
+# df_helmet %>%
+#  dplyr::filter(helmet_unknown==0 & helmet_negative==0) %>% View()
+
+## HELMET = POSITIVE----
+# first pull +HELMET and + HELMET (because of regex things)
+df$helmet_positive1 <- ifelse(str_detect(df$narrative_1, "\\+\\s?HELMET") , 1, 0)
+# first pull + FUll HELMET and +FULL HELMET (because of regex things)
+df$helmet_positive1.1 <- ifelse(str_detect(df$narrative_1, "\\+\\s?FULL HELMET") , 1, 0)
+# first pull + FUll BIKE HELMET and +FULL BIKE HELMET (because of regex things)
+df$helmet_positive1.2 <- ifelse(str_detect(df$narrative_1, "\\+\\s?FULL BIKE HELMET") , 1, 0)
+# first pull + BIKE HELMET and +BIKE HELMET (because of regex things)
+df$helmet_positive1.3 <- ifelse(str_detect(df$narrative_1, "\\+\\s?BIKE HELMET") , 1, 0)
+# first pull & HELMET (because of regex things)
+df$helmet_positive1.4 <- ifelse(str_detect(df$narrative_1, "\\&\\s?HELMET") , 1, 0)
+# first pull + HELMEMT (because of regex things)
+df$helmet_positive1.5 <- ifelse(str_detect(df$narrative_1, "\\+\\s?HELMEMT") , 1, 0)
+
+# create positive list and pull all records matching
+helmet_pos <- c("WITH A HELMET", "WITH HELMET", "POSITIVE FOR HELMET", "POSITIVE FOR A HELMET", "HELMETED", 
+"WEARING HELMET", "WEARING A HELMET", "W/ HELMET", "W HELMET", "WORE HELMET", "W/HELMET", 
+"W/ A HELMET", "HAD ON A HELMET", "HAD ON HELMET", "HAD HELMET", "HAD A HELMET", "HIS HELMET", 
+"HER HELMET", "PT HELMET", "PTS HELMET", "WAS WEARING A HELMET", ",HELMET,", "CRACKED HELMET", 
+"CRACKING HELMET", "HELMET CRACKED", "HELMET ON", "BROKE HELMET", "HELMET BROKE", "BREAKING HELMET", 
+"POSITIVE HELMET", "WORE HELMET", "WEARING A BIKE HELMET", "WEARING A FULL FACE HELMET", 
+"WEARING FULL FACE HELMET", "INCLUDING HELMET", " FULL HELMET", "PT'S HELMET", 
+"HELMET FELL", "SMASHED HELMET", "PLUS HELMET", "HELMET WAS FRACTURED", "HELMET WAS BROKEN", 
+ "WEARING BIKE HELMET", "ENDORSES HELMET", "HELMET WENT OFF", 
+"FULL FACE MASK HELMET", "& HELMET", "HELMET WAS REPORTED TO BE CRACKED", "HELMETD", "WHELMET")
+
+df <- df %>%
+  mutate(helmet_positive2 = ifelse(Reduce(`|`, lapply(helmet_pos, str_detect, string = narrative_1)), 1, 0))
+
+# create variable to combine the two positive variables and remove old variables
+df$helmet_positive3 <- ifelse(df$helmet_positive1 == 1 | df$helmet_positive1.1 == 1 | df$helmet_positive1.2  == 1 | df$helmet_positive1.3 == 1| df$helmet_positive1.4 == 1|  df$helmet_positive1.5 == 1|df$helmet_positive2 == 1, 1, 0)
+df<- select(df, -c(helmet_positive1, helmet_positive1.1,helmet_positive1.2,helmet_positive1.3, helmet_positive1.4,helmet_positive1.5, helmet_positive2))
+
+# subset only the positives that have not already been labeled as negative or unknown
+df$cant_be_pos <- ifelse(df$helmet_negative == 1 | df$helmet_unknown == 1, 1, 0)
+df$helmet_positive <- ifelse(df$helmet_positive3 == 1 & df$cant_be_pos == 0, 1, 0)
+
+df<- select(df, -c(helmet_positive3, cant_be_pos))
+
+nrow(df) - (sum(df$helmet_negative==1) + 
+  sum(df$helmet_unknown==1) + sum(df$helmet_positive==1))
+
+# Create a new variable 'helmet_unknown_all' for all of the unknowns (includes the "helmet_unknown" variable)
+df$helmet_unknown_all <- ifelse(df$helmet_positive != 1 & df$helmet_negative != 1, 1, 0)
+
+
+```
+
+## 2019 micromobility variables
+
+powered scooter, hoverboard, e-bike, bikes
+```{r}
+
+# Process 2019 separately bc product codes changed
+# to get correct ebike, bike, scooter product code for 2019
+# in 2020 discontinued 1329 and 5042 (scooter, powered) replaced with 5022, 5023 (unpowered), 5024
+df_19 <- df %>%
+  filter(year %in% c("2019"))
+
+df_20_21_22 <- df %>%
+  filter(year %in% c("2020", "2021", "2022"))
+
+#note: all coded as 0=no, 1=yes
+
+#POWERED SCOOTER (5042)
+# scooter code
+df_19$Code5042<-0
+df_19$Code5042[df_19$product_1==5042 | df_19$product_2==5042 | df_19$product_3==5042]<-1
+
+# scooter indicator
+scooter1<-grep(c("scooter"), df_19$narrative_1, ignore.case = TRUE)
+length(scooter1) 
+df_19$scooter1<-0
+df_19$scooter1[scooter1]<-1
+
+df_19$scooter<-0
+df_19$scooter[df_19$scooter1==1 & df_19$Code5042==1]<-1
+
+# remove interim variables
+df_19<-df_19[,!names(df_19) %in% c("scooter1")]
+
+#  powered skateboard indicator
+skateboard1<-grep(c("skate|skate board|skateboard"),df_19$narrative_1, ignore.case = TRUE)
+length(skateboard1) 
+df_19$skateboard1<-0
+df_19$skateboard1[skateboard1]<-1
+
+df_19$skateboard<-0
+df_19$skateboard[df_19$skateboard1==1 & df_19$Code5042==1]<-1
+
+# remove interim variables
+df_19<-df_19[,!names(df_19) %in% c("skateboard1")]
+
+#HOVERBOARD - 
+# hoverboard variable
+hover1<-grep(c("hoverboard|hooverboard|hover board|hoover board|hoverbaord|hooverbaord|hover boad|hoverboad,|hoverbrd"), df_19$narrative_1, ignore.case = TRUE)
+length(hover1) 
+df_19$hover1<-0
+df_19$hover1[hover1]<-1
+
+df_19$hover<-0
+df_19$hover[df_19$hover1==1 & df_19$Code5042==1]<-1
+
+# remove interim variables
+df_19<-df_19[,!names(df_19) %in% c("hover1")]
+
+# powered bike code
+df_19$Codes5035.3215<-0
+df_19$Codes5035.3215[df_19$product_1==5035 | df_19$product_2==5035 | df_19$product_3==5035| df_19$product_1==3215 | df_19$product_2==3215 |df_19$product_3==3215]<-1
+
+# E-BIKE (5035, 3215)
+
+#search narratives for bike or bicycle
+ebike1<-grep(c("bike*| bicycle*"), df_19$narrative_1, ignore.case = TRUE)
+length(ebike1) 
+df_19$ebike1<-0
+df_19$ebike1[ebike1]<-1
+
+#search narratives for elec or batt or motor
+ebike2<-grep(c("elect*|batt*|motor*"), df_19$narrative_1, ignore.case = TRUE)
+length(ebike2) 
+df_19$ebike2<-0
+df_19$ebike2[ebike2]<-1
+
+#combine so that have narratives that contain ebike 1 AND ebike2 conditions
+df_19$ebike12<-0
+df_19$ebike12[df_19$ebike1==1 & df_19$ebike2==1]<-1
+
+df_19$ebike<-0
+df_19$ebike[df_19$ebike12==1 & df_19$Codes5035.3215==1]<-1
+
+# remove interim variables
+df_19<-df_19[,!names(df_19) %in% c("ebike1", "ebike2", "ebike12")]
+
+#BIKE 
+
+# identify codes for bicycles (code 5040) and mountain bikes (code 5033)
+
+df_19$bike1<-0
+df_19$bike1[df_19$product_1==5040 | df_19$product_2==5040 | df_19$product_3==5040]<-1
+
+df_19$bike2<-0
+df_19$bike2[df_19$product_1==5033 | df_19$product_2==5033 | df_19$product_3==5033]<-1
+
+df_19$bike<-0
+df_19$bike[df_19$bike1==1 | df_19$bike2==1]<-1
+
+# remove interim variables
+df_19<-df_19[,!names(df_19) %in% c("bike1", "bike2","Code5042", "Codes5035.3215")]
+
+```
+## 2020-2022 micromobility variables
+
+e-scooter, hoverboard, e-bike, bikes
+```{r}
+
+#note: all coded as 0=no, 1=yes
+
+#POWERED SCOOTER (5022, new code)
+# scooter code
+df_20_21_22$Code5042<-0
+df_20_21_22$Code5042[df_20_21_22$product_1==5022 | df_20_21_22$product_2==5022 | df_20_21_22$product_3==5022]<-1
+
+# scooter indicator
+scooter1<-grep(c("scooter"), df_20_21_22$narrative_1, ignore.case = TRUE)
+length(scooter1) 
+df_20_21_22$scooter1<-0
+df_20_21_22$scooter1[scooter1]<-1
+
+df_20_21_22$scooter<-0
+df_20_21_22$scooter[df_20_21_22$scooter1==1 & df_20_21_22$Code5042==1]<-1
+
+# remove interim variables
+df_20_21_22<-df_20_21_22[,!names(df_20_21_22) %in% c("scooter1")]
+
+#  powered skateboard (5025, new code for powered skateboard and hoverboard)
+
+df_20_21_22$Code5025<-0
+df_20_21_22$Code5025[df_20_21_22$product_1==5025 | df_20_21_22$product_2==5025 | df_20_21_22$product_3==5025]<-1
+
+
+skateboard1<-grep(c("skate|skate board|skateboard"),df_20_21_22$narrative_1, ignore.case = TRUE)
+length(skateboard1) 
+df_20_21_22$skateboard1<-0
+df_20_21_22$skateboard1[skateboard1]<-1
+
+df_20_21_22$skateboard<-0
+df_20_21_22$skateboard[df_20_21_22$skateboard1==1 & df_20_21_22$Code5025==1]<-1
+
+# remove interim variables
+df_20_21_22<-df_20_21_22[,!names(df_20_21_22) %in% c("skateboard1")]
+
+#HOVERBOARD - 
+# hoverboard variable use 5025
+hover1<-grep(c("hoverboard|hooverboard|hover board|hoover board|hoverbaord|hooverbaord|hover boad|hoverboad,|hoverbrd"), df_20_21_22$narrative_1, ignore.case = TRUE)
+length(hover1) 
+df_20_21_22$hover1<-0
+df_20_21_22$hover1[hover1]<-1
+
+df_20_21_22$hover<-0
+df_20_21_22$hover[df_20_21_22$hover1==1 & df_20_21_22$Code5025==1]<-1
+
+# remove interim variables
+df_20_21_22<-df_20_21_22[,!names(df_20_21_22) %in% c("hover1")]
+
+#ELECTRIC BIKE
+
+# powered bike code
+df_20_21_22$Codes5035.3215<-0
+df_20_21_22$Codes5035.3215[df_20_21_22$product_1==5035 | df_20_21_22$product_2==5035 | df_20_21_22$product_3==5035| df_20_21_22$product_1==3215 | df_20_21_22$product_2==3215 |df_20_21_22$product_3==3215]<-1
+
+
+# E-BIKE (5035, 3215)
+
+#search narratives for bike or bicycle
+ebike1<-grep(c("bike*| bicycle*"), df_20_21_22$narrative_1, ignore.case = TRUE)
+length(ebike1) 
+df_20_21_22$ebike1<-0
+df_20_21_22$ebike1[ebike1]<-1
+
+#search narratives for elec or batt or motor
+ebike2<-grep(c("elect*|batt*|motor*"), df_20_21_22$narrative_1, ignore.case = TRUE)
+length(ebike2) 
+df_20_21_22$ebike2<-0
+df_20_21_22$ebike2[ebike2]<-1
+
+#combine so that have narratives that contain ebike 1 AND ebike2 conditions
+df_20_21_22$ebike12<-0
+df_20_21_22$ebike12[df_20_21_22$ebike1==1 & df_20_21_22$ebike2==1]<-1
+
+
+df_20_21_22$ebike<-0
+df_20_21_22$ebike[df_20_21_22$ebike12==1 & df_20_21_22$Codes5035.3215==1]<-1
+
+# remove interim variables
+df_20_21_22<-df_20_21_22[,!names(df_20_21_22) %in% c("ebike1", "ebike2", "ebike12")]
+
+#BIKE 
+
+# identify codes for bicycles (code 5040) and mountain bikes (code 5033)
+
+df_20_21_22$bike1<-0
+df_20_21_22$bike1[df_20_21_22$product_1==5040 | df_20_21_22$product_2==5040 | df_20_21_22$product_3==5040]<-1
+
+df_20_21_22$bike2<-0
+df_20_21_22$bike2[df_20_21_22$product_1==5033 | df_20_21_22$product_2==5033 | df_20_21_22$product_3==5033]<-1
+
+df_20_21_22$bike<-0
+df_20_21_22$bike[df_20_21_22$bike1==1 | df_20_21_22$bike2==1]<-1
+
+# remove interim variables
+df_20_21_22<-df_20_21_22[,!names(df_20_21_22) %in% c("bike1", "bike2", "Code5042","Codes5035.3215")]
+
+
+```
+
+##stack 2019 and 2020-2023 data
+```{r}
+
+# Find common vars
+common_vars <- intersect(names(df_19), names(df_20_21_22))
+
+# Subset both dataframes to include only common variables
+df1_subset <- df_19[, common_vars, drop = FALSE]
+df2_subset <- df_20_21_22[, common_vars, drop = FALSE]
+
+
+# Stack 2019 and 2020-2023 data
+df_clean <- rbind(df1_subset, df2_subset)
+
+names(df_clean)
+
+# Duplicate issue (11/30/2023 update)
+#decision to remove the duplicates from DF
+
+# Remove skateboard
+df_clean<- df_clean %>%
+  select(-c("skateboard"))
+
+# Note: use df_clean_with_dups to get total numbers of injuries in raw data
+df_clean_with_dups <-df_clean
+
+# Use df_clean for any of the multimode situations removed
+#this is the code to remove those situatiosn
+df_clean <- df_clean[
+  !(
+    df_clean$scooter == 1 & 
+    (df_clean$bike == 1 | df_clean$ebike == 1 |  df_clean$hover == 1) |
+    df_clean$bike == 1 & 
+    (df_clean$scooter == 1 | df_clean$ebike == 1 | df_clean$hover == 1) |
+    df_clean$ebike == 1 & 
+    (df_clean$scooter == 1 | df_clean$bike == 1  | df_clean$hover == 1) |
+    df_clean$hover == 1 & 
+    (df_clean$scooter == 1 | df_clean$bike == 1 | df_clean$ebike == 1)
+  ),
+]
+
+
+```
+
+```{r}
+
+#create long format df 
+df_long <- df_clean %>%
+  pivot_longer(cols = c(bike, ebike, scooter, hover), names_to = "mode", values_to = "value")
+
+# Filter rows where the value is 1
+df_filtered <- df_long %>%
+  filter(value == 1) %>%
+  select(-c(value))
+
+```
+
+this marks the end of the text-string search df cleaning and beginning of the analysis for the paper
+
+#manuscript analysis
+
+##read and clean chatgpt data
+```{r}
+gpt_v1 <- read.csv("data/chatgpt_data/gpt_v1_22NOV2023.csv") #low detail
+gpt_v2<-read.csv("data/chatgpt_data/gpt_v2_07DEC2023.csv") #high detail
+gpt_v2_retest<-read.csv("data/chatgpt_data/gpt_v2_retest_08DEC2023.csv") #high detail retest
+gpt_v3_retest<-read.csv("data/chatgpt_data/gpt_v3_retest_12DEC2023.csv") #high detail retest
+gpt_v4<-read.csv("data/chatgpt_data/gpt_v4_12DEC2023.csv") #intermediate detail
+gpt_v5_retest<-read.csv("data/chatgpt_data/gpt_v5_retest_13DEC2023.csv") #high detail retest
+gpt_v6_retest<-read.csv("data/chatgpt_data/gpt_v6_retest_14DEC2023.csv") #high detail retest
+
+
+#merge text-string and chatgpt dataframes
+df_gpt_v1<-merge(df_filtered, gpt_v1,
+                       by = "cpsc_case_number") 
+
+df_gpt_v2<-merge(df_filtered, gpt_v2,
+                        by = "cpsc_case_number")  
+
+df_gpt_v2_retest<-merge(df_filtered, gpt_v2_retest,
+                        by = "cpsc_case_number")  
+
+df_gpt_v3_retest<-merge(df_filtered, gpt_v3_retest,
+                        by = "cpsc_case_number")  
+
+
+df_gpt_v4<-merge(df_filtered, gpt_v4,
+                        by = "cpsc_case_number") 
+
+
+df_gpt_v5_retest<-merge(df_filtered, gpt_v5_retest,
+                        by = "cpsc_case_number") 
+
+
+df_gpt_v6_retest<-merge(df_filtered, gpt_v6_retest,
+                        by = "cpsc_case_number")
+
+
+df_gpt_v6_retest<-merge(df_filtered, gpt_v6_retest,
+                        by = "cpsc_case_number")
+
+
+
+#create new helmet_status_r variables and select variables of interest
+df_gpt_v1<- df_gpt_v1 %>%
+ mutate(helmet_status_r = case_when(
+    helmet_positive == 1 ~ "wearing helmet",
+    helmet_negative == 1 ~ "not wearing helmet",
+    helmet_unknown_all == 1 ~ "helmet not mentioned",
+    TRUE ~ "None"
+  )) %>%
+  select(cpsc_case_number, helmet_status, helmet_status_r, narrative_1)
+
+df_gpt_v2<- df_gpt_v2 %>%
+  mutate(helmet_status_r = case_when(
+    helmet_positive == 1 ~ "wearing helmet",
+    helmet_negative == 1 ~ "not wearing helmet",
+    helmet_unknown_all == 1 ~ "helmet not mentioned",
+    TRUE ~ "None"
+  )) %>%
+  select(cpsc_case_number, helmet_status, helmet_status_r, narrative_1)
+
+df_gpt_v2_retest<- df_gpt_v2_retest %>%
+  mutate(helmet_status_r = case_when(
+    helmet_positive == 1 ~ "wearing helmet",
+    helmet_negative == 1 ~ "not wearing helmet",
+    helmet_unknown_all == 1 ~ "helmet not mentioned",
+    TRUE ~ "None"
+  )) %>%
+  select(cpsc_case_number, helmet_status, helmet_status_r, narrative_1)
+
+
+df_gpt_v3_retest<- df_gpt_v3_retest %>%
+  mutate(helmet_status_r = case_when(
+    helmet_positive == 1 ~ "wearing helmet",
+    helmet_negative == 1 ~ "not wearing helmet",
+    helmet_unknown_all == 1 ~ "helmet not mentioned",
+    TRUE ~ "None"
+  )) %>%
+  select(cpsc_case_number, helmet_status, helmet_status_r, narrative_1)
+
+df_gpt_v4<- df_gpt_v4 %>%
+  mutate(helmet_status_r = case_when(
+    helmet_positive == 1 ~ "wearing helmet",
+    helmet_negative == 1 ~ "not wearing helmet",
+    helmet_unknown_all == 1 ~ "helmet not mentioned",
+    TRUE ~ "None"
+  )) %>%
+  select(cpsc_case_number, helmet_status, helmet_status_r, narrative_1)
+
+df_gpt_v5_retest<- df_gpt_v5_retest %>%
+  mutate(helmet_status_r = case_when(
+    helmet_positive == 1 ~ "wearing helmet",
+    helmet_negative == 1 ~ "not wearing helmet",
+    helmet_unknown_all == 1 ~ "helmet not mentioned",
+    TRUE ~ "None"
+  )) %>%
+  select(cpsc_case_number, helmet_status, helmet_status_r, narrative_1)
+
+
+df_gpt_v6_retest<- df_gpt_v6_retest %>%
+  mutate(helmet_status_r = case_when(
+    helmet_positive == 1 ~ "wearing helmet",
+    helmet_negative == 1 ~ "not wearing helmet",
+    helmet_unknown_all == 1 ~ "helmet not mentioned",
+    TRUE ~ "None"
+  )) %>%
+  select(cpsc_case_number, helmet_status, helmet_status_r, narrative_1)
+
+
+```
+
+##Table 2. Agreement Between the LLM and Text String-Search for Helmet Status (N = 54 569)
+
+###Table 2. low detail
+```{r}
+# make all categorical variables factors
+df_gpt_v1 <- mutate_at(df_gpt_v1, vars("helmet_status"), as.factor)
+
+  tbl_summary(data = df_gpt_v1,
+    by = helmet_status,
+                 include = c(helmet_status, helmet_status_r),
+    statistic = list(all_categorical() ~ "{n}"),
+    label = list(
+                 helmet_status_r ~ "helmet status r code"),
+    missing_text = "Not reported",
+    digits = list(all_categorical() ~ c(0, 1)))
+    
+```
+
+
+###Table 2. high detail
+```{r}
+# make all categorical variables factors
+df_gpt_v2 <- mutate_at(df_gpt_v2, vars("helmet_status"), as.factor)
+
+  tbl_summary(data = df_gpt_v2,
+    by = helmet_status,
+                 include = c(helmet_status, helmet_status_r),
+        statistic = list(all_categorical() ~ "{n}"),
+    label = list(
+                 helmet_status_r ~ "helmet status r code"),
+    missing_text = "Not reported",
+    digits = list(all_categorical() ~ c(0, 1)))
+
+```
+
+###Table 2. intermediate detail
+```{r}
+# make all categorical variables factors
+df_gpt_v4 <- mutate_at(df_gpt_v4, vars("helmet_status"), as.factor)
+
+  tbl_summary(data = df_gpt_v4,
+    by = helmet_status,
+                 include = c(helmet_status, helmet_status_r),
+        statistic = list(all_categorical() ~ "{n}"),
+    label = list(
+                 helmet_status_r ~ "helmet status r code"),
+    missing_text = "Not reported",
+    digits = list(all_categorical() ~ c(0, 1)))
+
+```
+
+
+### Table 2. low detail kappa
+```{r}
+
+# Set options to display three decimal places
+options(digits = 3)
+
+perc_agree_v1 <- df_gpt_v1 %>% select(helmet_status, helmet_status_r)
+
+unique(perc_agree_v1$helmet_status_r)
+#0=helmet not mentioned
+#1=wearing helmet
+#2=not wearing helmet
+
+
+# Create numeric variable for helmet_status
+perc_agree_v1 <- perc_agree_v1 %>%
+  mutate(helmet_status_numeric = recode_factor(helmet_status,
+                                               "0" = "helmet not mentioned",
+                                               "2" = "not wearing helmet",
+                                               "1" = "wearing helmet"))
+
+
+perc_agree_v1$helmet_status_numeric <- as.numeric(perc_agree_v1$helmet_status_numeric)
+
+
+# Create numeric variable for helmet_status_r
+perc_agree_v1 <- perc_agree_v1 %>%
+  mutate(helmet_status_r_numeric = recode_factor(helmet_status_r,
+                                               "0" = "helmet not mentioned",
+                                               "2" = "not wearing helmet",
+                                               "1" = "wearing helmet")) 
+
+perc_agree_v1$helmet_status_r_numeric <- as.numeric(perc_agree_v1$helmet_status_r_numeric)
+
+perc_agree_v1 <- perc_agree_v1 %>% select(helmet_status_numeric, helmet_status_r_numeric)
+
+
+agree(perc_agree_v1) #doesnt give CI
+kappa2(perc_agree_v1) #doesnt give CI
+cohen.kappa(perc_agree_v1) #gives CI
+
+
+# Calculate agreement and Kappa
+agree_result <- agree(perc_agree_v1)
+kappa_result <- kappa2(perc_agree_v1)
+cohen_kappa_result <- cohen.kappa(perc_agree_v1)
+
+# Extract and round numeric values
+agree_value <- round(agree_result$value, 3)
+kappa_value <- round(kappa_result$value, 4)
+
+# Print the rounded results
+cat("Agreement:", as.character(agree_value), "\n")
+
+# To get kappa to 3 decimal places
+cat("Kappa =", as.character(kappa_value), "\n")
+
+# To get CI to 3 decimal places
+str(cohen_kappa_result)
+
+
+```
+
+### Table 2. high detail kappa
+```{r}
+perc_agree_v2 <- df_gpt_v2 %>% select(helmet_status, helmet_status_r) #rerun with df_gpt_v2_retest for retest results
+
+unique(perc_agree_v2$helmet_status_r)
+#0=helmet not mentioned
+#1=wearing helmet
+#2=not wearing helmet
+
+
+# Create numeric variable for helmet_status
+perc_agree_v2 <- perc_agree_v2 %>%
+  mutate(helmet_status_numeric = recode_factor(helmet_status,
+                                               "0" = "helmet not mentioned",
+                                               "2" = "not wearing helmet",
+                                               "1" = "wearing helmet"))
+
+
+perc_agree_v2$helmet_status_numeric <- as.numeric(perc_agree_v2$helmet_status_numeric)
+
+
+# Create numeric variable for helmet_status_r
+perc_agree_v2<- perc_agree_v2 %>%
+  mutate(helmet_status_r_numeric = recode_factor(helmet_status_r,
+                                               "0" = "helmet not mentioned",
+                                               "2" = "not wearing helmet",
+                                               "1" = "wearing helmet")) 
+
+perc_agree_v2$helmet_status_r_numeric <- as.numeric(perc_agree_v2$helmet_status_r_numeric)
+
+perc_agree_v2 <- perc_agree_v2 %>% select(helmet_status_numeric, helmet_status_r_numeric)
+
+
+agree(perc_agree_v2) #doesnt give CI
+kappa2(perc_agree_v2) #doesnt give CI
+
+cohen.kappa(perc_agree_v2)
+
+
+
+# Calculate agreement and Kappa
+agree_result <- agree(perc_agree_v2)
+kappa_result <- kappa2(perc_agree_v2)
+cohen_kappa_result <- cohen.kappa(perc_agree_v2)
+
+# Extract and round numeric values
+agree_value <- round(agree_result$value, 3)
+kappa_value <- round(kappa_result$value, 4)
+
+# Print the rounded results
+cat("Agreement:", as.character(agree_value), "\n")
+
+# To get kappa to 3 decimal places
+cat("Kappa =", as.character(kappa_value), "\n")
+
+# To get CI to 3 decimal places
+str(cohen_kappa_result)
+```
+
+
+### Table 2. intermediate detail kappa
+```{r}
+perc_agree_v3 <- df_gpt_v4 %>% select(helmet_status, helmet_status_r) #rerun with df_gpt_v2_retest for retest results
+
+unique(perc_agree_v3$helmet_status_r)
+#0=helmet not mentioned
+#1=wearing helmet
+#2=not wearing helmet
+
+
+# Create numeric variable for helmet_status
+perc_agree_v3 <- perc_agree_v3 %>%
+  mutate(helmet_status_numeric = recode_factor(helmet_status,
+                                               "0" = "helmet not mentioned",
+                                               "2" = "not wearing helmet",
+                                               "1" = "wearing helmet"))
+
+
+perc_agree_v3$helmet_status_numeric <- as.numeric(perc_agree_v3$helmet_status_numeric)
+
+
+# Create numeric variable for helmet_status_r
+perc_agree_v3<- perc_agree_v3 %>%
+  mutate(helmet_status_r_numeric = recode_factor(helmet_status_r,
+                                               "0" = "helmet not mentioned",
+                                               "2" = "not wearing helmet",
+                                               "1" = "wearing helmet")) 
+
+perc_agree_v3$helmet_status_r_numeric <- as.numeric(perc_agree_v3$helmet_status_r_numeric)
+
+perc_agree_v3<- perc_agree_v3 %>% select(helmet_status_numeric, helmet_status_r_numeric)
+
+
+agree(perc_agree_v3) #doesnt give CI
+kappa2(perc_agree_v3) #doesnt give CI
+
+cohen.kappa(perc_agree_v3)
+
+
+# Calculate agreement and Kappa
+agree_result <- agree(perc_agree_v3)
+kappa_result <- kappa2(perc_agree_v3)
+cohen_kappa_result <- cohen.kappa(perc_agree_v3)
+
+# Extract and round numeric values
+agree_value <- round(agree_result$value, 3)
+kappa_value <- round(kappa_result$value, 4)
+
+# Print the rounded results
+cat("Agreement:", as.character(agree_value), "\n")
+
+# To get kappa to 3 decimal places
+cat("Kappa =", as.character(kappa_value), "\n")
+
+# To get CI to 3 decimal places
+str(cohen_kappa_result)
+```
+
+
+##test retest reliablity 5 rounds
+
+prep data
+```{r}
+# Create a list of your data frames
+dfs <- list(df_gpt_v2, df_gpt_v2_retest, df_gpt_v3_retest, df_gpt_v5_retest, df_gpt_v6_retest)
+
+# Create a vector of dates corresponding to each data frame
+dates <- c("12072023", "12082023", "12122023", "12132023", "12142023")
+
+# Function to process each data frame
+process_dataframe <- function(df, date) {
+  # Drop 'helmet_status_r' column if it exists
+  if ("helmet_status_r" %in% colnames(df)) {
+    df <- df %>% select(-helmet_status_r)
+  }
+  
+  # Add a new column with the date
+  df$date_column <- date
+  
+  return(df)
+}
+
+# Process each data frame in the list
+processed_dfs <- Map(process_dataframe, dfs, dates)
+
+# Combine the processed data frames into a long data frame
+long_df <- bind_rows(processed_dfs)
+
+
+```
+
+
+##Table 3. Test-Retest Reliability for the LLM for High- Detail 5 Prompt Across 5Sessions and Days.
+```{r}
+table(long_df$helmet_status, long_df$date_column)
+```
+
+
+###kappa fleiss 
+```{r}
+variables <- list("helmet_status") 
+
+kappa_fleiss <- function(subscale) {
+  result <- long_df %>%
+    select(all_of(subscale), date_column, cpsc_case_number) %>% 
+    pivot_wider(names_from = date_column, values_from = subscale) %>% # make data wide
+    select("12072023", "12082023", "12122023", "12132023", "12142023") %>% # remove description
+    kappam.fleiss()
+  
+  return(result)
+}
+
+# Use the lapply() function to apply kappa_fleiss to each variable.
+results <- lapply(variables, kappa_fleiss)
+
+# Print the 'results' list
+print(results)
+
+str(results)
+
+
+# Extract and round numeric values
+p_value <- round(results$value, 3)
+kappa_value <- round(kappa_result$value, 4)
+
+# Print the rounded results
+cat("Agreement:", as.character(agree_value), "\n")
+
+#to get kappa to 3 decimal places
+cat("Kappa =", as.character(kappa_value), "\n")
+
+#to get CI to 3 decimal places
+str(cohen_kappa_result)
+
+```
+
+##ground truth analysis
+
+notes:  we used the high detail prompt where gpt performed the best on dec 7, 2023. 
+
+notes about data cleaning and prep:
+
+cleaning code for ground truth was not included in this code but we can provide additional code if requested.
+
+from the high detail prompt df and the helmet status coded column in the df we randomly selected:
+200 unknown
+100 helmet
+100 unhelmeted
+
+1)three coders reviewed 1/3 of the sample
+2)all three coders randomly reviewed 1/4 of sample (100 records)
+
+
+##read ground truth df merged with gpt/r dataframe 
+(cleaning code not provided)
+```{r}
+df<-read.csv("data/ground_truth_df.csv")
+```
+
+### prep data for confusion matrix
+
+pull out values from each col to create confusion matrix
+```{r}
+
+#human
+helmet_status_values <- df$helmet_status_human
+helmet_status_values <- str_trim(helmet_status_values)
+helmet_status_values <- gsub("\\s+", "", helmet_status_values)
+cat("c(", paste(helmet_status_values, collapse = ", "), ")\n")
+
+#gpt
+helmet_status_values <- df$helmet_status
+helmet_status_values <- str_trim(helmet_status_values)
+helmet_status_values <- gsub("\\s+", "", helmet_status_values)
+cat("c(", paste(helmet_status_values, collapse = ", "), ")\n")
+
+
+#r
+helmet_status_values <- df$helmet_status_r
+helmet_status_values <- str_trim(helmet_status_values)
+helmet_status_values <- gsub("\\s+", "", helmet_status_values)
+cat("c(", paste(helmet_status_values, collapse = ", "), ")\n")
+
+
+```
+
+```{r}
+
+#For more than two classes, the sensitivity, specificity, positive predictive value and negative predictive value are calculated comparing each factor level to the remaining levels (i.e. a "one versus all" approach).
+
+# True labels (human coded)
+true_labels <- c( 2, 2, 2, 2, 0, 0, 1, 0, 0, 1, 2, 2, 2, 0, 2, 2, 0, 0, 2, 2, 2, 0, 2, 0, 1, 2, 2, 2, 2, 1, 0, 1, 2, 0, 2, 2, 1, 2, 0, 0, 1, 2, 2, 1, 0, 2, 0, 2, 2, 1, 1, 0, 0, 0, 2, 2, 2, 2, 1, 2, 0, 2, 2, 2, 1, 1, 1, 1, 1, 2, 1, 0, 0, 0, 2, 2, 2, 2, 1, 2, 0, 1, 1, 2, 2, 2, 1, 1, 2, 1, 2, 2, 0, 1, 2, 1, 0, 2, 2, 0, 2, 0, 2, 2, 0, 1, 2, 2, 1, 0, 2, 0, 0, 2, 0, 2, 2, 0, 1, 0, 2, 2, 2, 1, 2, 2, 1, 2, 2, 2, 1, 0, 2, 2, 0, 1, 2, 2, 2, 2, 2, 1, 2, 2, 2, 1, 1, 2, 2, 2, 2, 1, 0, 2, 0, 2, 0, 0, 0, 1, 0, 2, 2, 1, 1, 2, 2, 0, 1, 2, 2, 0, 2, 1, 2, 2, 2, 0, 0, 1, 1, 0, 1, 1, 2, 2, 1, 2, 2, 0, 2, 0, 2, 0, 2, 0, 0, 2, 2, 2, 2, 2, 0, 0, 2, 0, 2, 2, 1, 0, 1, 2, 2, 0, 2, 1, 0, 1, 0, 2, 1, 2, 2, 0, 0, 2, 2, 2, 1, 2, 2, 1, 2, 1, 1, 0, 2, 0, 1, 1, 2, 2, 1, 2, 0, 1, 2, 2, 2, 0, 2, 0, 1, 0, 1, 1, 2, 2, 1, 2, 2, 1, 1, 1, 0, 2, 0, 0, 1, 2, 1, 0, 2, 1, 1, 0, 2, 1, 1, 2, 1, 1, 2, 1, 2, 2, 2, 0, 2, 0, 1, 2, 2, 2, 2, 1, 2, 2, 2, 0, 2, 0, 2, 2, 2, 2, 0, 2, 1, 2, 2, 2, 1, 1, 2, 2, 0, 0, 2, 0, 2, 0, 2, 2, 0, 1, 0, 1, 1, 1, 0, 1, 2, 2, 0, 2, 0, 1, 0, 0, 0, 2, 0, 2, 1, 0, 2, 0, 2, 2, 0, 2, 2, 1, 2, 1, 2, 2, 2, 0, 1, 2, 1, 1, 0, 0, 1, 2, 0, 2, 2, 0, 1, 2, 0, 2, 2, 0, 2, 1, 2, 0, 2, 0, 1, 2, 2, 1, 1, 0, 2, 1, 0, 2, 2, 2, 1, 2, 2, 2 )
+
+
+
+# Predictions from GPT
+predictions_method1 <- c(2, 2, 2, 2, 0, 2, 1, 0, 0, 1, 2, 2, 2, 0, 2, 2, 0, 0, 2, 2, 2, 0, 2, 0, 1, 2, 2, 2, 2, 1, 0, 1, 2, 0, 2, 2, 1, 2, 0, 0, 1, 2, 2, 1, 0, 2, 0, 2, 2, 1, 1, 0, 0, 0, 2, 2, 2, 2, 1, 2, 0, 2, 2, 2, 1, 1, 1, 1, 1, 2, 1, 0, 0, 0, 2, 2, 2, 2, 1, 2, 0, 1, 1, 2, 2, 2, 1, 1, 2, 1, 2, 2, 0, 1, 2, 1, 0, 2, 2, 0, 2, 0, 2, 2, 0, 1, 2, 2, 1, 0, 2, 0, 0, 2, 0, 2, 2, 0, 1, 0, 2, 2, 2, 1, 2, 2, 1, 2, 2, 2, 1, 0, 2, 2, 0, 1, 2, 2, 2, 2, 2, 1, 2, 2, 2, 1, 1, 2, 2, 2, 2, 1, 0, 2, 0, 2, 0, 0, 0, 1, 0, 2, 2, 1, 1, 2, 2, 0, 1, 2, 2, 0, 2, 1, 2, 2, 2, 0, 0, 1, 1, 0, 1, 1, 2, 2, 1, 2, 2, 0, 2, 0, 2, 0, 2, 0, 0, 2, 2, 2, 2, 2, 0, 0, 2, 0, 2, 2, 2, 0, 1, 2, 2, 0, 2, 1, 0, 1, 0, 2, 1, 2, 2, 0, 0, 2, 2, 2, 1, 2, 2, 1, 2, 1, 1, 0, 2, 0, 1, 2, 2, 2, 1, 2, 1, 1, 2, 2, 2, 0, 2, 0, 1, 0, 1, 1, 2, 2, 1, 2, 2, 1, 1, 1, 0, 2, 0, 0, 1, 2, 1, 0, 2, 1, 1, 0, 2, 1, 1, 2, 1, 1, 2, 1, 2, 2, 2, 0, 2, 0, 1, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 0, 2, 2, 2, 2, 0, 2, 1, 2, 2, 2, 1, 1, 2, 2, 0, 0, 2, 0, 2, 0, 2, 2, 0, 1, 0, 1, 1, 1, 0, 1, 2, 2, 0, 2, 0, 1, 0, 1, 0, 2, 0, 2, 1, 0, 2, 0, 2, 2, 0, 2, 2, 1, 2, 1, 2, 2, 2, 0, 1, 2, 1, 1, 0, 0, 1, 2, 0, 2, 2, 0, 1, 2, 0, 2, 2, 0, 2, 1, 2, 0, 2, 0, 1, 2, 2, 1, 1, 0, 2, 1, 0, 2, 2, 2, 1, 2, 2, 2 )
+
+# Predictions from R
+predictions_method2 <- c( 2, 2, 2, 2, 0, 2, 1, 0, 0, 1, 2, 2, 2, 0, 2, 2, 0, 0, 2, 2, 2, 0, 2, 0, 1, 2, 2, 2, 2, 1, 0, 1, 2, 0, 2, 2, 1, 2, 0, 0, 1, 2, 2, 1, 0, 2, 0, 2, 2, 1, 1, 0, 0, 0, 2, 2, 2, 2, 1, 2, 0, 2, 2, 2, 1, 1, 1, 1, 1, 2, 1, 0, 0, 0, 2, 2, 2, 2, 1, 2, 0, 1, 1, 2, 2, 2, 1, 1, 2, 1, 2, 2, 0, 1, 2, 1, 0, 2, 2, 0, 2, 0, 2, 2, 0, 1, 2, 2, 1, 0, 2, 0, 0, 2, 0, 2, 2, 0, 1, 0, 2, 2, 2, 1, 2, 2, 1, 2, 2, 2, 1, 0, 2, 2, 0, 1, 2, 2, 2, 2, 2, 1, 2, 2, 2, 1, 1, 2, 2, 2, 2, 1, 0, 2, 0, 2, 0, 0, 0, 1, 0, 2, 2, 1, 1, 2, 2, 0, 1, 2, 2, 0, 2, 1, 2, 2, 2, 0, 0, 1, 1, 0, 1, 1, 2, 2, 1, 2, 2, 0, 2, 0, 2, 0, 2, 0, 0, 2, 2, 2, 2, 2, 0, 0, 2, 0, 2, 2, 2, 0, 1, 2, 2, 0, 2, 1, 0, 1, 0, 2, 1, 2, 2, 0, 0, 2, 2, 2, 1, 2, 2, 1, 2, 1, 1, 0, 2, 0, 1, 2, 2, 2, 1, 2, 1, 1, 2, 2, 2, 0, 2, 0, 1, 0, 1, 1, 2, 2, 1, 2, 2, 1, 1, 1, 0, 2, 0, 0, 1, 2, 1, 0, 2, 1, 1, 0, 2, 1, 1, 2, 1, 1, 2, 1, 2, 2, 2, 0, 2, 0, 1, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 0, 2, 2, 2, 2, 0, 2, 1, 2, 2, 2, 1, 1, 2, 2, 0, 0, 2, 0, 2, 0, 2, 2, 0, 1, 0, 1, 1, 1, 0, 1, 2, 2, 0, 2, 0, 1, 0, 1, 0, 2, 0, 2, 1, 0, 2, 0, 2, 2, 0, 2, 2, 1, 2, 1, 2, 2, 2, 0, 1, 2, 1, 1, 0, 0, 1, 2, 0, 2, 2, 0, 1, 2, 0, 2, 2, 0, 2, 1, 2, 0, 2, 0, 1, 2, 2, 1, 1, 0, 2, 1, 0, 2, 2, 2, 1, 2, 2, 2 )
+
+# Convert predictions_method1 and true_labels to factors with the same levels
+true_labels <- factor(true_labels, levels = c("0", "1", "2"))
+predictions_method1 <- factor(predictions_method1, levels = c("0", "1", "2"))
+predictions_method2 <- factor(predictions_method2, levels = c("0", "1", "2"))
+
+
+```
+
+### Table 4. Performance of the LLM and Text String-Search Compared With Gold Criterion Standard (n = 400)
+```{r}
+
+# Create confusion matrices
+# Recreate confusion matrices using confusionMatrix() function
+
+# gpt
+conf_matrix_method1 <- confusionMatrix(factor(predictions_method1), true_labels, positive = "1")
+conf_matrix_method1 <- confusionMatrix(factor(predictions_method1), true_labels, positive = "1",  mode = "prec_recall")
+
+# r
+conf_matrix_method2 <- confusionMatrix(factor(predictions_method2), true_labels, positive = "1")
+conf_matrix_method2 <- confusionMatrix(factor(predictions_method2), true_labels, positive = "1", mode = "prec_recall")
+
+
+# kappa for gpt vs human
+kappa <-df %>% select(helmet_status, helmet_status_human)
+kappa_result<-kappa2(kappa) #doesnt give CI
+kappa_value <- round(kappa_result$value, 4)
+
+
+# to get kappa to 3 decimal places
+cat("Kappa =", as.character(kappa_value), "\n")
+
+cohen_kappa_result <- cohen.kappa(kappa)
+# to get CI to 3 decimal places
+str(cohen_kappa_result)
+
+
+# kappa for r vs human
+kappa <-df %>% select(helmet_status_r, helmet_status_human)
+kappa_result<-kappa2(kappa) #doesnt give CI
+kappa_value <- round(kappa_result$value, 4)
+
+
+# to get kappa to 3 decimal places
+cat("Kappa =", as.character(kappa_value), "\n")
+
+cohen_kappa_result <- cohen.kappa(kappa)
+# to get CI to 3 decimal places
+str(cohen_kappa_result)
+
+
+```
+
